@@ -66,7 +66,7 @@ export class TerminalSessionManager {
   private readonly sessions = new Map<string, TerminalSession>();
   private readonly byConn = new Map<string, Set<string>>();
   private readonly pendingOpens = new Map<TerminalPendingOpen, TerminalOwner>();
-  // Connection-owned opens still awaiting spawn. A disconnect flips their
+  // Connection-backed opens still awaiting spawn. A disconnect flips their
   // abort flag so the resumed open kills the PTY instead of registering an
   // orphan for a dead connection.
   private readonly pendingByConn = new Map<string, Set<TerminalPendingOpen>>();
@@ -145,7 +145,7 @@ export class TerminalSessionManager {
       }
       reservationActive = false;
       this.opening -= 1;
-      this.untrackPendingOpen(request.owner, pending);
+      this.untrackPendingOpen(request.owner, pending, request.viewerConnId);
     };
     const pending: TerminalPendingOpen = {
       agentId: request.agentId,
@@ -163,7 +163,7 @@ export class TerminalSessionManager {
       pending.abort(this.openAbortMessage(request.signal));
     };
     request.signal?.addEventListener("abort", abortPending, { once: true });
-    this.trackPendingOpen(request.owner, pending);
+    this.trackPendingOpen(request.owner, pending, request.viewerConnId);
     let backend: TerminalBackend;
     try {
       backend = request.createBackend
@@ -263,7 +263,7 @@ export class TerminalSessionManager {
     const session: TerminalSession = {
       id: sessionId,
       owner: request.owner,
-      viewers: new Set(),
+      viewers: request.viewerConnId ? new Set([request.viewerConnId]) : new Set(),
       agentId: request.agentId,
       cwd: request.cwd,
       shell: request.shell,
@@ -280,6 +280,11 @@ export class TerminalSessionManager {
     this.sessions.set(session.id, session);
     if (request.owner.kind === "conn") {
       this.indexByConn(request.owner.connId, session.id);
+    }
+    if (request.viewerConnId) {
+      this.indexByConn(request.viewerConnId, session.id);
+    }
+    if (request.owner.kind === "conn" || request.viewerConnId) {
       session.output.push(composeTerminalIntroBanner());
     }
 
@@ -534,15 +539,20 @@ export class TerminalSessionManager {
     return this.list().filter((summary) => sessionIds.has(summary.sessionId));
   }
 
-  private trackPendingOpen(owner: TerminalOwner, pending: TerminalPendingOpen): void {
+  private trackPendingOpen(
+    owner: TerminalOwner,
+    pending: TerminalPendingOpen,
+    viewerConnId?: string,
+  ): void {
     this.pendingOpens.set(pending, owner);
-    if (owner.kind !== "conn") {
+    const connId = owner.kind === "conn" ? owner.connId : viewerConnId;
+    if (!connId) {
       return;
     }
-    let set = this.pendingByConn.get(owner.connId);
+    let set = this.pendingByConn.get(connId);
     if (!set) {
       set = new Set();
-      this.pendingByConn.set(owner.connId, set);
+      this.pendingByConn.set(connId, set);
     }
     set.add(pending);
   }
@@ -551,16 +561,21 @@ export class TerminalSessionManager {
     return signal?.reason instanceof Error ? signal.reason.message : "terminal open cancelled";
   }
 
-  private untrackPendingOpen(owner: TerminalOwner, pending: TerminalPendingOpen): void {
+  private untrackPendingOpen(
+    owner: TerminalOwner,
+    pending: TerminalPendingOpen,
+    viewerConnId?: string,
+  ): void {
     this.pendingOpens.delete(pending);
-    if (owner.kind !== "conn") {
+    const connId = owner.kind === "conn" ? owner.connId : viewerConnId;
+    if (!connId) {
       return;
     }
-    const set = this.pendingByConn.get(owner.connId);
+    const set = this.pendingByConn.get(connId);
     if (set) {
       set.delete(pending);
       if (set.size === 0) {
-        this.pendingByConn.delete(owner.connId);
+        this.pendingByConn.delete(connId);
       }
     }
   }
