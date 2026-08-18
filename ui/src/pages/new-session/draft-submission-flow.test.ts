@@ -471,7 +471,7 @@ describe("DraftSubmissionFlow", () => {
           hello: {
             auth: {
               role: "operator",
-              scopes: ["operator.read", "operator.write", "operator.admin"],
+              scopes: ["operator.read", "operator.write"],
             },
             features: { methods: ["sessions.create", "sessions.dispatch"] },
           },
@@ -503,7 +503,7 @@ describe("DraftSubmissionFlow", () => {
         context,
         data: undefined,
         isConnected: true,
-        isAdmin: place?.isAdmin() ?? true,
+        isAdmin: place?.isAdmin() ?? false,
         canStartAsDraft: flow?.canStartAsDraft() ?? false,
         visibility: flow?.visibility ?? "normal",
         cloudProfileId: place?.cloudProfileId ?? "",
@@ -535,7 +535,7 @@ describe("DraftSubmissionFlow", () => {
         nodes: place?.nodes ?? [],
         folder: place?.folder ?? "",
         execNode: place?.execNode ?? "",
-        isAdmin: place?.isAdmin() ?? true,
+        isAdmin: place?.isAdmin() ?? false,
       }),
       {
         requestUpdate: vi.fn(),
