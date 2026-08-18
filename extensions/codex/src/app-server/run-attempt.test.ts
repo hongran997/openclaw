@@ -1715,7 +1715,8 @@ describe("runCodexAppServerAttempt", () => {
       data?: { prompt?: string; systemPrompt?: string };
       type: string;
     }> = [];
-    Object.assign(params, {
+    params.hostCapabilities = Object.freeze({
+      ...params.hostCapabilities,
       trajectoryRecorder: {
         recordEvent: (type: string, data?: { prompt?: string; systemPrompt?: string }) => {
           trajectoryEvents.push({ type, data });
