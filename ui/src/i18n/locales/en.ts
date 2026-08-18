@@ -3493,6 +3493,14 @@ export const en: TranslationMap = {
       yesterday: "Yesterday",
       earlier: "Earlier this week",
     },
+    applied: {
+      history: "History",
+      revision: "{count} revision",
+      revisions: "{count} revisions",
+      create: "Create",
+      update: "Update",
+      version: "v{version}",
+    },
     previewContext: "in {slug}",
     actions: {
       close: "Close",
