@@ -2140,6 +2140,7 @@ export const en: TranslationMap = {
     settingsSearchPlaceholder: "Search settings…",
     settingsSearchNoResults: "No matching settings.",
     settingsSearchClear: "Clear settings search",
+    settingsLoadFailed: "Settings navigation could not load.",
     exitSettings: "Back to app",
     expand: "Expand sidebar",
     collapse: "Collapse sidebar",
