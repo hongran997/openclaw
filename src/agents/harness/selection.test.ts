@@ -525,7 +525,6 @@ describe("runAgentHarnessAttempt", () => {
     );
     const params = createAttemptParams(providerRuntimeConfig("codex", "codex"));
     params.trajectoryRecorder = {
-      describeFlushState: () => undefined,
       recordEvent,
       flush,
     };
