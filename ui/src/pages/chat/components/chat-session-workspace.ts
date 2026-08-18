@@ -71,36 +71,23 @@ type SessionWorkspaceState = {
   browserSearch: string;
   browserSearchTimer: ReturnType<typeof globalThis.setTimeout> | null;
   collapsed: boolean;
+  connectionEpoch: number;
   dock: ChatWorkspaceDock;
+  diffContent?: SidebarContent;
   error: string | null;
   list: SessionWorkspaceListResult | null;
   loading: boolean;
+  openRequest?: object;
   pendingReload: boolean;
-  requestId: number;
   sessionKey: string;
 };
-
-type OpenRequest = {
-  agentId: string;
-  id: number;
-  itemId: string;
-  sessionKey: string;
-};
-
-type SessionWorkspaceOpenRequest = OpenRequest;
-
-// Re-renders must preserve the document identity or the mounted diff panel
-// treats its loader as new and requests sessions.diff again.
-const sessionDiffSidebarContentByHost = new WeakMap<
-  SessionWorkspaceHost,
-  { content: SidebarContent; sessionKey: string }
->();
 
 export type SessionWorkspaceHost = {
   sessionKey: string;
   sessions: SessionCapability;
   client: GatewayBrowserClient | null;
   connected: boolean;
+  connectionEpoch: number;
   hello: GatewayHelloOk | null;
   terminalAvailable?: boolean;
   browserPanelAvailable?: boolean;
@@ -108,8 +95,8 @@ export type SessionWorkspaceHost = {
   agentsList?: SessionScopeHost["agentsList"];
   settings?: UiSettings;
   sessionWorkspaceState?: SessionWorkspaceState;
-  sessionWorkspaceOpenRequest?: SessionWorkspaceOpenRequest;
   sessionWorkspaceDraftScope?: string;
+  sidebarContent: SidebarContent | null;
   requestUpdate?: () => void;
   handleOpenSidebar: (content: SidebarContent | null) => void;
 };
@@ -139,41 +126,65 @@ function clearWorkspaceSearchTimer(workspace: SessionWorkspaceState | undefined)
   }
 }
 
+const checkoutSidebarContents = new WeakSet<object>();
+
+function openCheckoutSidebar(state: SessionWorkspaceHost, content: SidebarContent) {
+  checkoutSidebarContents.add(content);
+  state.handleOpenSidebar(content);
+}
+
+function clearCheckoutSidebar(state: SessionWorkspaceHost) {
+  if (state.sidebarContent && checkoutSidebarContents.has(state.sidebarContent)) {
+    state.handleOpenSidebar(null);
+  }
+}
+
+function createWorkspaceState(
+  state: SessionWorkspaceHost,
+  previous?: SessionWorkspaceState,
+): SessionWorkspaceState {
+  return {
+    activeId: null,
+    agentId: paneSessionAgentId(state),
+    browserPath: "",
+    browserSearch: "",
+    browserSearchTimer: null,
+    collapsed: previous?.collapsed ?? true,
+    connectionEpoch: state.connectionEpoch,
+    // Dock preference is app-wide, seeded from the host's loaded settings;
+    // per-session state just carries it forward.
+    dock: previous?.dock ?? normalizeChatWorkspaceDock(state.settings?.chatWorkspaceDock),
+    error: null,
+    list: null,
+    loading: false,
+    pendingReload: false,
+    sessionKey: state.sessionKey,
+  };
+}
+
 export function clearSessionWorkspaceTimers(state: SessionWorkspaceHost) {
   clearWorkspaceSearchTimer(state.sessionWorkspaceState);
 }
 
 function getWorkspaceState(state: SessionWorkspaceHost): SessionWorkspaceState {
-  const sessionKey = state.sessionKey;
-  const agentId = paneSessionAgentId(state);
   const current = state.sessionWorkspaceState;
-  if (current?.sessionKey === sessionKey && current.agentId === agentId) {
+  if (current && isCurrentWorkspace(state, current)) {
     return current;
   }
+  clearCheckoutSidebar(state);
   clearWorkspaceSearchTimer(current);
-  const next: SessionWorkspaceState = {
-    activeId: null,
-    agentId,
-    browserPath: "",
-    browserSearch: "",
-    browserSearchTimer: null,
-    collapsed: true,
-    // Dock preference is app-wide, seeded from the host's loaded settings;
-    // per-session state just carries it forward.
-    dock: current?.dock ?? normalizeChatWorkspaceDock(state.settings?.chatWorkspaceDock),
-    error: null,
-    list: null,
-    loading: false,
-    pendingReload: false,
-    requestId: 0,
-    sessionKey,
-  };
+  const next = createWorkspaceState(state, current);
   state.sessionWorkspaceState = next;
   return next;
 }
 
-function currentWorkspaceState(state: SessionWorkspaceHost): SessionWorkspaceState {
-  return getWorkspaceState(state);
+function isCurrentWorkspace(state: SessionWorkspaceHost, workspace: SessionWorkspaceState) {
+  return (
+    state.sessionWorkspaceState === workspace &&
+    workspace.sessionKey === state.sessionKey &&
+    workspace.agentId === paneSessionAgentId(state) &&
+    workspace.connectionEpoch === state.connectionEpoch
+  );
 }
 
 function requestUpdate(state: SessionWorkspaceHost) {
@@ -313,8 +324,6 @@ function loadWorkspace(
     }
     return;
   }
-  const requestId = workspace.requestId + 1;
-  workspace.requestId = requestId;
   workspace.loading = true;
   workspace.error = null;
   if (force) {
@@ -323,6 +332,7 @@ function loadWorkspace(
   workspace.pendingReload = false;
   const sessionKey = state.sessionKey;
   const agentId = workspace.agentId;
+  const client = state.client;
   void (async () => {
     try {
       const files = await state.sessions.listFiles(sessionKey, {
@@ -330,20 +340,22 @@ function loadWorkspace(
         search: workspace.browserSearch,
         agentId,
       });
-      const artifacts = await state.client?.request<{
+      if (!isCurrentWorkspace(state, workspace)) {
+        return;
+      }
+      const artifacts = await client.request<{
         artifacts?: SessionWorkspaceListResult["artifacts"];
       } | null>("artifacts.list", {
         sessionKey,
         ...(agentId ? { agentId } : {}),
       });
-      const current = currentWorkspaceState(state);
-      if (current !== workspace || current.requestId !== requestId) {
+      if (!isCurrentWorkspace(state, workspace)) {
         return;
       }
       const fileItems = files?.files ?? [];
       const artifactItems = artifacts?.artifacts ?? [];
       const browserItems = files?.browser?.entries ?? [];
-      current.list = {
+      workspace.list = {
         sessionKey,
         ...(files?.root ? { root: files.root } : {}),
         ...(typeof files?.gitCheckout === "boolean" ? { gitCheckout: files.gitCheckout } : {}),
@@ -352,26 +364,24 @@ function loadWorkspace(
         artifacts: artifactItems,
       };
       if (
-        current.activeId &&
-        !fileItems.some((file) => `file:${file.path}` === current.activeId) &&
-        !browserItems.some((entry) => `file:${entry.path}` === current.activeId) &&
-        !artifactItems.some((artifact) => `artifact:${artifact.id}` === current.activeId)
+        workspace.activeId &&
+        !fileItems.some((file) => `file:${file.path}` === workspace.activeId) &&
+        !browserItems.some((entry) => `file:${entry.path}` === workspace.activeId) &&
+        !artifactItems.some((artifact) => `artifact:${artifact.id}` === workspace.activeId)
       ) {
-        current.activeId = null;
+        workspace.activeId = null;
       }
     } catch (error) {
-      const current = currentWorkspaceState(state);
-      if (current === workspace && current.requestId === requestId) {
-        current.error = formatUiError(error);
+      if (isCurrentWorkspace(state, workspace)) {
+        workspace.error = formatUiError(error);
       }
     } finally {
-      const current = currentWorkspaceState(state);
-      if (current === workspace && current.requestId === requestId) {
-        current.loading = false;
-        const reload = current.pendingReload;
-        current.pendingReload = false;
+      if (isCurrentWorkspace(state, workspace)) {
+        workspace.loading = false;
+        const reload = workspace.pendingReload;
+        workspace.pendingReload = false;
         if (reload) {
-          loadWorkspace(state, current);
+          loadWorkspace(state, workspace);
         }
       }
       requestUpdate(state);
@@ -385,6 +395,11 @@ export function refreshSessionWorkspace(state: SessionWorkspaceHost) {
   if (!workspace || workspace.sessionKey !== state.sessionKey) {
     return;
   }
+  const diffOpen = workspace.diffContent && state.sidebarContent === workspace.diffContent;
+  delete workspace.diffContent;
+  if (diffOpen) {
+    state.handleOpenSidebar(resolveSessionDiffSidebarContent(state));
+  }
   if (workspace.loading) {
     workspace.pendingReload = true;
   } else {
@@ -392,33 +407,37 @@ export function refreshSessionWorkspace(state: SessionWorkspaceHost) {
   }
 }
 
-function beginOpenRequest(
-  state: SessionWorkspaceHost,
-  workspace: SessionWorkspaceState,
-  itemId: string,
-): OpenRequest {
-  workspace.activeId = itemId;
-  const previous = state.sessionWorkspaceOpenRequest;
-  const request: OpenRequest = {
-    agentId: workspace.agentId,
-    id: (previous?.id ?? 0) + 1,
-    itemId,
-    sessionKey: state.sessionKey,
-  };
-  state.sessionWorkspaceOpenRequest = request;
-  return request;
+/** Retire facts owned by one checkout without disturbing panel layout or retained drafts. */
+export function retireSessionWorkspaceCheckout(state: SessionWorkspaceHost) {
+  const current = state.sessionWorkspaceState;
+  if (!current || current.sessionKey !== state.sessionKey) {
+    return;
+  }
+  clearCheckoutSidebar(state);
+  clearWorkspaceSearchTimer(current);
+  const next = createWorkspaceState(state, current);
+  state.sessionWorkspaceState = next;
+  if (state.client && state.connected) {
+    loadWorkspace(state, next);
+  }
+  requestUpdate(state);
 }
 
-function isCurrentOpenRequest(state: SessionWorkspaceHost, request: OpenRequest): boolean {
-  const currentRequest = state.sessionWorkspaceOpenRequest;
-  const current = currentWorkspaceState(state);
+function beginOpenRequest(workspace: SessionWorkspaceState, itemId: string): object {
+  workspace.activeId = itemId;
+  return (workspace.openRequest = {});
+}
+
+function isCurrentOpenRequest(
+  state: SessionWorkspaceHost,
+  workspace: SessionWorkspaceState,
+  request: object,
+  itemId: string,
+): boolean {
   return (
-    currentRequest?.id === request.id &&
-    currentRequest.agentId === paneSessionAgentId(state) &&
-    currentRequest.itemId === request.itemId &&
-    currentRequest.sessionKey === state.sessionKey &&
-    current?.agentId === request.agentId &&
-    current.activeId === request.itemId
+    workspace.openRequest === request &&
+    isCurrentWorkspace(state, workspace) &&
+    workspace.activeId === itemId
   );
 }
 
@@ -426,11 +445,11 @@ function openWorkspaceItem<T>(
   state: SessionWorkspaceHost,
   workspace: SessionWorkspaceState,
   itemId: string,
-  load: (request: OpenRequest) => Promise<T | null | undefined>,
+  load: () => Promise<T | null | undefined>,
   render: (result: T) => SidebarContent | null,
   missingMessage: string,
 ) {
-  const request = beginOpenRequest(state, workspace, itemId);
+  const request = beginOpenRequest(workspace, itemId);
   void (async () => {
     if (!state.client || !state.connected) {
       return;
@@ -438,19 +457,19 @@ function openWorkspaceItem<T>(
     state.handleOpenSidebar(null);
     workspace.error = null;
     try {
-      const result = await load(request);
+      const result = await load();
       const content = result == null ? null : render(result);
       if (!content) {
-        if (isCurrentOpenRequest(state, request)) {
+        if (isCurrentOpenRequest(state, workspace, request, itemId)) {
           workspace.error = missingMessage;
         }
         return;
       }
-      if (isCurrentOpenRequest(state, request)) {
-        state.handleOpenSidebar(content);
+      if (isCurrentOpenRequest(state, workspace, request, itemId)) {
+        openCheckoutSidebar(state, content);
       }
     } catch (error) {
-      if (isCurrentOpenRequest(state, request)) {
+      if (isCurrentOpenRequest(state, workspace, request, itemId)) {
         workspace.error = formatUiError(error);
       }
     } finally {
@@ -470,9 +489,9 @@ function openFile(
     state,
     workspace,
     `file:${path}`,
-    (request) =>
-      state.sessions.getFile(request.sessionKey, requestPath, {
-        agentId: request.agentId,
+    () =>
+      state.sessions.getFile(workspace.sessionKey, requestPath, {
+        agentId: workspace.agentId,
       }),
     (result) => {
       const file = result.file;
@@ -656,11 +675,11 @@ function openArtifact(
     state,
     workspace,
     `artifact:${artifactId}`,
-    (request) =>
+    () =>
       state.client!.request<ArtifactDownloadResult | null>("artifacts.download", {
-        sessionKey: request.sessionKey,
+        sessionKey: workspace.sessionKey,
         artifactId,
-        ...(request.agentId ? { agentId: request.agentId } : {}),
+        ...(workspace.agentId ? { agentId: workspace.agentId } : {}),
       }),
     (result) =>
       !result.artifact
@@ -736,7 +755,7 @@ export function createSessionWorkspaceProps(
       }, 160);
     },
     onOpenArtifact: (artifactId) => openArtifact(state, workspace, artifactId),
-    onOpenDiff: diffContent ? () => state.handleOpenSidebar(diffContent) : undefined,
+    onOpenDiff: diffContent ? () => openCheckoutSidebar(state, diffContent) : undefined,
   };
 }
 
@@ -752,29 +771,34 @@ export function resolveSessionDiffSidebarContent(
   if (!canOpenDiff) {
     return null;
   }
-  const cached = sessionDiffSidebarContentByHost.get(state);
-  if (cached?.sessionKey === state.sessionKey) {
-    return cached.content;
+  if (workspace.diffContent) {
+    return workspace.diffContent;
   }
-  const content = buildSessionDiffSidebarContent(state);
-  sessionDiffSidebarContentByHost.set(state, { content, sessionKey: state.sessionKey });
+  const content = buildSessionDiffSidebarContent(state, workspace);
+  checkoutSidebarContents.add(content);
+  workspace.diffContent = content;
   return content;
 }
 
 /** Sidebar payload whose loader refetches sessions.diff for the pane's session. */
-function buildSessionDiffSidebarContent(state: SessionWorkspaceHost): SidebarContent {
+function buildSessionDiffSidebarContent(
+  state: SessionWorkspaceHost,
+  workspace: SessionWorkspaceState,
+): SidebarContent {
   const sessionKey = state.sessionKey;
+  const client = state.client;
+  const agentId = workspace.agentId;
   const canLoadFileText =
     isGatewayMethodAdvertised(state, "sessions.files.get") === true && Boolean(state.client);
   return {
     kind: "session-diff",
     load: async (scope) => {
-      if (!state.client) {
+      if (!client) {
         throw new Error(t("chat.sessionDiff.disconnected"));
       }
-      return await state.client.request<SessionsDiffResult>("sessions.diff", {
+      return await client.request<SessionsDiffResult>("sessions.diff", {
         sessionKey,
-        ...scopedAgentParamsForSession(state, sessionKey),
+        ...(agentId ? { agentId } : {}),
         ...scope,
       });
     },
@@ -782,7 +806,7 @@ function buildSessionDiffSidebarContent(state: SessionWorkspaceHost): SidebarCon
       ? async (path) => {
           try {
             const result = await state.sessions.getFile(sessionKey, path, {
-              agentId: scopedAgentParamsForSession(state, sessionKey).agentId,
+              agentId,
             });
             const file = result?.file;
             if (
