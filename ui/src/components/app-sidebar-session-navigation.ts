@@ -339,7 +339,7 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
       catalogIds:
         this.sessionsStatusFilter === "archived"
           ? []
-          : this.sessionData.sessionCatalogs.map((catalog) => catalog.id),
+          : this.visibleSessionCatalogs().map((catalog) => catalog.id),
       collapsedSections: this.collapsedSessionSections,
       hideEmptyCreatorFilteredGroup: (category, rowCount) =>
         this.sessionCreatorFilterActive && Boolean(category) && rowCount === 0,
